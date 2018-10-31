@@ -236,6 +236,21 @@ void pciSetup(byte pin)
     PCICR |= bit(digitalPinToPCICRbit(pin));                   // enable interrupt for the group
 }
 
+void powersave(OsDeltaTime maxTime);
+
+void testDuration(int32_t ms)
+{
+    const auto delta = OsDeltaTime::from_ms(ms);
+    PRINT_DEBUG_1("Test sleep time for %i ms.",ms);
+    const OsTime start = os_getTime();
+    PRINT_DEBUG_1("Start Test sleep time.");
+    powersave(delta);
+    const OsTime end = os_getTime();
+    PRINT_DEBUG_1("End Test sleep time.");
+    PRINT_DEBUG_1("Test Time should be : %d ms", (end-start).to_ms());
+}
+
+
 void setup()
 {
 #if LMIC_DEBUG_LEVEL > 0
@@ -269,7 +284,7 @@ void setup()
     do_send();
 }
 
-void powersave(OsDeltaTime const &maxTime)
+void powersave(OsDeltaTime maxTime)
 {
     OsDeltaTime duration_selected;
     period_t period_selected;
