@@ -276,13 +276,15 @@ void setup()
     LMIC.setEventCallBack(onEvent);
     LMIC.setDevEuiCallback(getDevEui);
     LMIC.setArtEuiCallback(getArtEui);
-
     // set clock error to allow good connection.
     LMIC.setClockError(MAX_CLOCK_ERROR * 3 / 100);
+//    LMIC.setAntennaPowerAdjustment(-10);
 
     // Start job (sending automatically starts OTAA too)
     do_send();
 }
+
+const int64_t sleepAdj = 1080;
 
 void powersave(OsDeltaTime maxTime)
 {
