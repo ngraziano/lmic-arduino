@@ -5,7 +5,7 @@
 
 #include <hal/hal_io.h>
 
-#include <LowPower.h>
+#include <sleepandwatchdog.h>
 #include <SparkFun_APDS9960.h>
 
 #define DEVICE_POSTDETECT
@@ -13,6 +13,7 @@
 
 void do_send();
 void reset_and_do_send();
+void powersave(OsDeltaTime maxTime);
 
 // This EUI must be in little-endian format, so least-significant-byte
 // first. When copying an EUI from ttnctl output, this means to reverse
@@ -42,10 +43,9 @@ SparkFun_APDS9960 apds = SparkFun_APDS9960();
 // cycle limitations).
 const OsDeltaTime TX_INTERVAL = OsDeltaTime::from_sec(60 * 60);
 // keep ON for one minute
-const OsDeltaTime TX_ONLENGTH = OsDeltaTime::from_sec(20);
+const OsDeltaTime TX_ONLENGTH = OsDeltaTime::from_sec(1 * 60);
 
 const unsigned int BAUDRATE = 19200;
-
 
 // Pin mapping
 const lmic_pinmap lmic_pins = {
@@ -56,13 +56,18 @@ const lmic_pinmap lmic_pins = {
 };
 LmicEu868 LMIC(lmic_pins);
 
-
 const uint8_t NUMBERTIME_TO_SEND = 3;
 uint8_t apds_tosend = 0;
 bool apds_new = false;
 
-void initProximitySensor(uint8_t threshold)
+uint16_t readBat()
 {
+    return analogRead(A1) * (6.6 / 1024 * 100);
+}
+
+void initProximitySensor(uint8_t threshold, uint8_t ledDrive, uint8_t gain)
+{
+
     if (apds.init())
     {
         Serial.println(F("APDS-9960 initialization complete"));
@@ -75,8 +80,8 @@ void initProximitySensor(uint8_t threshold)
     // Set proximity interrupt thresholds
     apds.setProximityIntLowThreshold(0);
     apds.setProximityIntHighThreshold(threshold);
-    apds.setProximityGain(DEFAULT_PGAIN);
-    apds.setLEDDrive(LED_DRIVE_50MA);
+    apds.setProximityGain(gain); // DEFAULT_PGAIN
+    apds.setLEDDrive(ledDrive);  // LED_DRIVE_50MA
     apds.setProximityIntEnable(1);
     apds.enablePower();
     apds.setMode(PROXIMITY, 1);
@@ -86,6 +91,31 @@ void disableProximitySensor()
 {
     apds.setMode(PROXIMITY, 0);
     apds.disablePower();
+}
+
+void enableProximitySensor()
+{
+    apds.enablePower();
+    apds.setMode(PROXIMITY, 1);
+}
+
+void waitBatOk()
+{
+    auto batLevel = readBat();
+    // wait here for battery to gain a little of charge
+    if (batLevel < 360)
+    {
+        disableProximitySensor();
+        while (batLevel < 370)
+        {
+            PRINT_DEBUG_1("Bat level %i", batLevel);
+            Serial.flush();
+            powersave(OsDeltaTime::from_sec(30));
+            delay(200);
+            batLevel = readBat();
+        }
+        enableProximitySensor();
+    }
 }
 
 void apdsInterrupt()
@@ -103,11 +133,12 @@ void apdsInterrupt()
 
 void onEvent(EventType ev)
 {
+    rst_wdt();
     switch (ev)
     {
     case EventType::JOINING:
         PRINT_DEBUG_2("EV_JOINING");
-//        LMIC.setDrJoin(0);
+        //        LMIC.setDrJoin(0);
         break;
     case EventType::JOINED:
         PRINT_DEBUG_2("EV_JOINED");
@@ -120,11 +151,14 @@ void onEvent(EventType ev)
         break;
     case EventType::TXCOMPLETE:
         PRINT_DEBUG_2("EV_TXCOMPLETE (includes waiting for RX windows)");
+        waitBatOk();
         if (LMIC.txrxFlags & TxRxStatus::ACK)
             PRINT_DEBUG_2("Received ack");
-        if (LMIC.dataLen)
+        if (LMIC.dataLen >= 3)
         {
             PRINT_DEBUG_2("Received %d  bytes of payload", LMIC.dataLen);
+            Serial.flush();
+
             if (LMIC.dataBeg > 0)
             {
                 uint8_t port = LMIC.frame[LMIC.dataBeg - 1];
@@ -132,19 +166,24 @@ void onEvent(EventType ev)
                 {
                     disableProximitySensor();
                     delay(500);
-                    initProximitySensor(LMIC.frame[LMIC.dataBeg]);
+                    initProximitySensor(LMIC.frame[LMIC.dataBeg],
+                                        LMIC.frame[LMIC.dataBeg + 1],
+                                        LMIC.frame[LMIC.dataBeg + 2]);
                 }
             }
         }
         // we have transmit
         if (apds_tosend)
         {
-
+            PRINT_DEBUG_1("Schedule reset and send");
+            Serial.flush();
             // schedule back to off
             sendjob.setTimedCallback(os_getTime() + TX_ONLENGTH, reset_and_do_send);
         }
         else
         {
+            PRINT_DEBUG_1("Schedule send");
+            Serial.flush();
             // Schedule next transmission
             sendjob.setTimedCallback(os_getTime() + TX_INTERVAL, do_send);
         }
@@ -193,7 +232,7 @@ void do_send()
         // battery
         data[0] = 1;
         data[1] = 2;
-        uint16_t val = analogRead(A1) * (6.6 / 1024 * 100);
+        uint16_t val = readBat();
         data[2] = val >> 8;
         data[3] = val;
 
@@ -227,7 +266,6 @@ ISR(PCINT0_vect)
     // one of pins D8 to D13 has changed
     // store time, will be check in OSS.runloopOnce()
     LMIC.store_trigger();
- 
 }
 
 void pciSetup(byte pin)
@@ -237,20 +275,17 @@ void pciSetup(byte pin)
     PCICR |= bit(digitalPinToPCICRbit(pin));                   // enable interrupt for the group
 }
 
-void powersave(OsDeltaTime maxTime);
-
 void testDuration(int32_t ms)
 {
     const auto delta = OsDeltaTime::from_ms(ms);
-    PRINT_DEBUG_1("Test sleep time for %i ms.",ms);
+    PRINT_DEBUG_1("Test sleep time for %i ms.", ms);
     const OsTime start = os_getTime();
     PRINT_DEBUG_1("Start Test sleep time.");
     powersave(delta);
     const OsTime end = os_getTime();
     PRINT_DEBUG_1("End Test sleep time.");
-    PRINT_DEBUG_1("Test Time should be : %d ms", (end-start).to_ms());
+    PRINT_DEBUG_1("Test Time should be : %d ms", (end - start).to_ms());
 }
-
 
 void setup()
 {
@@ -258,9 +293,10 @@ void setup()
     Serial.begin(BAUDRATE);
     Serial.println(F("Starting"));
 #endif
+
     pinMode(3, INPUT);
     attachInterrupt(digitalPinToInterrupt(3), apdsInterrupt, FALLING);
-    initProximitySensor(40);
+    initProximitySensor(40, LED_DRIVE_50MA, DEFAULT_PGAIN);
 
     pciSetup(lmic_pins.dio[0]);
     pciSetup(lmic_pins.dio[1]);
@@ -271,6 +307,8 @@ void setup()
     // Reset the MAC state. Session and pending data transfers will be discarded.
     LMIC.reset();
 
+    testDuration(30000);
+
     uint8_t buf[16];
     memcpy_P(buf, APPKEY, 16);
     LMIC.aes.setDevKey(buf);
@@ -279,8 +317,10 @@ void setup()
     LMIC.setArtEuiCallback(getArtEui);
     // set clock error to allow good connection.
     LMIC.setClockError(MAX_CLOCK_ERROR * 3 / 100);
-//    LMIC.setAntennaPowerAdjustment(-10);
+    //    LMIC.setAntennaPowerAdjustment(-10);
 
+    waitBatOk();
+    configure_wdt();
     // Start job (sending automatically starts OTAA too)
     do_send();
 }
@@ -290,37 +330,37 @@ const int64_t sleepAdj = 1080;
 void powersave(OsDeltaTime maxTime)
 {
     OsDeltaTime duration_selected;
-    period_t period_selected;
+    Sleep period_selected;
     // these value are base on test
     if (maxTime > OsDeltaTime::from_ms(8700))
     {
         duration_selected = OsDeltaTime::from_ms(8050);
-        period_selected = SLEEP_8S;
+        period_selected = Sleep::P8S;
     }
     else if (maxTime > OsDeltaTime::from_ms(4600))
     {
         duration_selected = OsDeltaTime::from_ms(4050);
-        period_selected = SLEEP_4S;
+        period_selected = Sleep::P4S;
     }
     else if (maxTime > OsDeltaTime::from_ms(2600))
     {
         duration_selected = OsDeltaTime::from_ms(2000);
-        period_selected = SLEEP_2S;
+        period_selected = Sleep::P2S;
     }
     else if (maxTime > OsDeltaTime::from_ms(1500))
     {
         duration_selected = OsDeltaTime::from_ms(1000);
-        period_selected = SLEEP_1S;
+        period_selected = Sleep::P1S;
     }
     else if (maxTime > OsDeltaTime::from_ms(800))
     {
         duration_selected = OsDeltaTime::from_ms(500);
-        period_selected = SLEEP_500MS;
+        period_selected = Sleep::P500MS;
     }
     else if (maxTime > OsDeltaTime::from_ms(500))
     {
         duration_selected = OsDeltaTime::from_ms(250);
-        period_selected = SLEEP_250MS;
+        period_selected = Sleep::P250MS;
     }
     else
     {
@@ -334,18 +374,19 @@ void powersave(OsDeltaTime maxTime)
 
     for (uint16_t nbsleep = maxTime / duration_selected; nbsleep > 0 && !apds_new; nbsleep--)
     {
-        LowPower.powerDown(period_selected, ADC_OFF, BOD_OFF);
+        powerDown(period_selected);
         hal_add_time_in_sleep(duration_selected);
 
         // Check if we are wakeup by external pin.
         apdsInterrupt();
     }
 
-    PRINT_DEBUG_1("Wakeup");
+    PRINT_DEBUG_1("Wakeup apds_new :%i", apds_new);
 }
 
 void loop()
 {
+    rst_wdt();
     OsDeltaTime to_wait = OSS.runloopOnce();
     if (to_wait > OsDeltaTime(0) && hal_is_sleep_allow())
     {
@@ -368,4 +409,7 @@ void loop()
         apds_new = false;
         do_send();
     }
+    #if LMIC_DEBUG_LEVEL > 0
+    Serial.print(".");
+    #endif
 }
