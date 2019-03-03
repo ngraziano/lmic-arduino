@@ -1,6 +1,6 @@
 # LORAWAN Librairie for Arduino and SX1276/2 lora chip
 
-This library is not maintain anymore, please have a look to https://github.com/ngraziano/LMICPP-Arduino and example : examples/balise
+**This library is not maintain anymore, please have a look to https://github.com/ngraziano/LMICPP-Arduino and example : `examples/balise`**
 
 ## Introduction
 
